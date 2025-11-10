@@ -1,104 +1,204 @@
 import os
+import re
+import json
 import logging
+import asyncio
+import subprocess
+from datetime import datetime, timedelta
 from telethon import TelegramClient, events
-from datetime import datetime
+from telethon.tl.functions.channels import EditBannedRequest
+from telethon.tl.types import ChatBannedRights, User
 
-# Configure logging
+# Telegram API credentials
+API_ID = 22627280
+API_HASH = "b2e5eb5e3dd886f5b8be6a749a26f619"
+OWNER_ID = 1240179115  # Your Telegram ID
+
+# Configuration
+client = TelegramClient('session_name', API_ID, API_HASH)
+channel_link = "https://t.me/+GUUGE6jYNKZiZDll"
+price_list_link = "https://t.me/VIPCHEATS_FEESBACK/1221"
+upload_qr_code = 'QR.jpg'
+gif_path = 'hello.gif'
+upi_id = "ninjagamerop0786@ybl"
+cooldown_period = 600  # 10 minutes
+last_qr_request = {}
+free_requests = {}  # For tracking 'free' spam
+
+# Logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Use your own values from my.telegram.org
-api_id = os.getenv('API_ID', '22627280')  # Replace with your actual API ID
-api_hash = os.getenv('API_HASH', 'b2e5eb5e3dd886f5b8be6a749a26f619')  # Replace with your actual API Hash
+# Cache messages
+cached_messages = {
+    "qr": f"**Here is my QR code for payment.**\n\n💳 UPI ID: `{upi_id}`\n\n📣 Join our channel: {channel_link}\n\n📸 **Please Send a Screenshot of Payment**",
+    "hi": "👋 Hello! How can I assist you?",
+    "free": f"🖕🏻 **FREE VALA CHANNEL PER MILEGA!** 🖕🏻\n\n🎯 [**CLICK HERE**]({channel_link})",
+    "cooldown": "🖕🏻 **BSDK RUK JA 10 Min USKE BAAD MILEGA QR.** 🖕🏻",
+    "mute_warning": "❌ **Spam Detected! You're muted for 5 minutes.**"
+}
 
-# Create the client and connect
-client = TelegramClient('session_name', api_id, api_hash)
-
-# Define your channel link
-channel_link = "https://t.me/+GUUGE6jYNKZiZDll"  # Replace with your actual channel link
-
-# Path to your QR code image
-qr_code_path = 'qr.jpg'  # Replace with the path to your QR code image
-
-# Cooldown period in seconds
-cooldown_period = 600
-
-# Dictionary to track last QR request time for each user
-last_qr_request = {}
-
-# Function to check if you are online
-async def is_user_online(client, user_id):
+# SMS Reading (via Termux)
+def get_latest_sms():
     try:
-        user = await client.get_entity(user_id)
-        return user.status is not None and user.status.online
+        result = subprocess.run(["termux-sms-list"], capture_output=True, text=True)
+        sms_list = json.loads(result.stdout)
+        if sms_list:
+            return sms_list[0]
     except Exception as e:
-        logger.error(f"Error checking online status for {user_id}: {e}")
-        return False
+        logger.error(f"Error reading SMS: {e}")
+    return None
 
+# Extract payment details
+def extract_payment_details(sms_body):
+    upi_pattern = r"(?i)(?:received|credited)\s+\u20b9?(\d+(\.\d{1,2})?)\s+from\s+([a-zA-Z\s]+)"
+    match = re.search(upi_pattern, sms_body)
+    if match:
+        amount = match.group(1)
+        sender = match.group(3).strip()
+        return amount, sender
+    return None, None
+
+# Background SMS checker
+async def check_sms():
+    last_checked = None
+    while True:
+        sms = get_latest_sms()
+        if sms and sms['body'] != last_checked:
+            last_checked = sms['body']
+            amount, sender = extract_payment_details(sms['body'])
+            if amount and sender:
+                message = f"✅ **Payment Received!**\n💰 **Amount:** ₹{amount}\n👤 **Sender:** {sender}"
+                # Only notify OWNER privately
+                await client.send_message(OWNER_ID, message)
+        await asyncio.sleep(30)
+
+# Main Handler
 @client.on(events.NewMessage(incoming=True))
 async def handler(event):
     try:
-        # Check if the message is from a user (not a group or channel)
-        if event.is_private:
-            # Get the current time
-            current_time = datetime.now().time()
+        # Skip any non-private chat (group, channel, bot)
+        chat = await event.get_chat()
+        if not isinstance(chat, User):
+            return  # Ignore groups/channels
+        if chat.bot:
+            return  # Ignore bots
 
-            # Define the time window for dinner time
-            start_time = datetime.strptime("20:00", "%H:%M").time()
-            end_time = datetime.strptime("22:00", "%H:%M").time()
+        user_id = event.sender_id
+        message_text = event.raw_text.lower().strip()
+        now = datetime.now()
 
-            # Convert the message text to lowercase for case-insensitive comparison
-            message_text = event.raw_text.lower()
+        # QR / UPI Request
+        if message_text in ['qr', 'upi', 'scanner', 'scaner', 'scnr']:
+            if user_id in last_qr_request and (now - last_qr_request[user_id]).total_seconds() < cooldown_period:
+                await event.reply(cached_messages["cooldown"])
+                return
+            await client.send_file(
+                event.chat_id,
+                upload_qr_code,
+                caption=cached_messages["qr"],
+                link_preview=False
+            )
+            last_qr_request[user_id] = now
+            asyncio.create_task(check_sms())
 
-            # Keywords list for QR request detection
-            qr_keywords = ['qr', 'upi', 'scanner', 'scanr']
+        # Price Command
+        elif 'price' in message_text:
+            await event.reply(f"🛒 **Here is our price list:** {price_list_link}", link_preview=False)
 
-            # Check if the message contains any QR related keyword
-            if any(keyword in message_text for keyword in qr_keywords):
-                user_id = event.sender_id
-                now = datetime.now()
+        # Help
+        elif 'help' in message_text:
+            help_message = f"""
+🤖 **Available Commands:**
 
-                # Check if the user is in the cooldown period
-                if user_id in last_qr_request:
-                    last_request_time = last_qr_request[user_id]
-                    if (now - last_request_time).total_seconds() < cooldown_period:
-                        await event.reply("Please wait before requesting the QR code again.")
-                        return
+- **`qr`** → Get QR Code + UPI ID together  
+- **`price`** → Get the price list link  
+- **`/id`** → Get your own Telegram ID  
+- **`/id @username`** (Owner Only) → Get user ID of a specific user  
+- **`free`** → Get a response with a channel link  
+"""
+            await event.reply(help_message)
 
-                # Send the QR code image and update the last request time
-                await client.send_file(event.chat_id, qr_code_path, caption="Here is my QR code for payment. 
-" + channel_link)
-                last_qr_request[user_id] = now
-            
-            elif 'free' in message_text:
-                # Respond to messages containing 'free' with formatted text and clickable link
-                reply_text = f'free vala to channel pr milega bhai
-Channel <a href="{channel_link}">CLICK HERE</a>'
-                await event.reply(reply_text, parse_mode='html')
-            
-            elif 'channel' in message_text or 'channel link' in message_text or 'link' in message_text:
-                # Respond to messages containing 'channel', 'channel link', or 'link'
-                await event.reply(f"My channel link: {channel_link}")
-            
-            elif start_time <= current_time <= end_time:
-                # Send a specific auto-reply during dinner time
-                await event.reply(f"It's DINNER TIME! I will reply to you soon. Check out my channel: {channel_link}")
-            
+        # ID Commands
+        elif message_text.startswith('/id'):
+            parts = message_text.split()
+            if len(parts) == 1:
+                await event.reply(f"**Your Telegram ID:** `{user_id}`")
+            elif len(parts) > 1 and user_id == OWNER_ID:
+                try:
+                    username = parts[1]
+                    entity = await client.get_entity(username)
+                    if isinstance(entity, User):
+                        await event.reply(f"**User ID of {username}:** `{entity.id}`")
+                    else:
+                        await event.reply("❌ **That’s not a user account.**")
+                except Exception as e:
+                    await event.reply("❌ **User not found!**")
+                    logger.error(f"Error fetching user ID: {e}")
             else:
-                # Check if you are offline
-                user_id = 'NINJAGAMEROP'  # Replace with your Telegram user ID
-                online_status = await is_user_online(client, user_id)
+                await event.reply("❌ **You are not authorized to check other users' IDs!**")
 
-                if not online_status:
-                    # If offline, send the offline message
-                    await event.reply("I am offline now. Please wait for my reply.")
+        # /unmute @username (Owner Only)
+        elif message_text.startswith("/unmute") and user_id == OWNER_ID:
+            parts = message_text.split()
+            if len(parts) == 2:
+                try:
+                    target_user = parts[1]
+                    entity = await client.get_entity(target_user)
+                    if isinstance(entity, User) and not entity.bot:
+                        await client(EditBannedRequest(
+                            peer=event.chat_id,
+                            user_id=entity.id,
+                            banned_rights=ChatBannedRights(
+                                until_date=None,
+                                send_messages=False
+                            )
+                        ))
+                        await event.reply(f"✅ **User {target_user} has been unmuted.**")
+                    else:
+                        await event.reply("❌ **Cannot unmute bot or channel.**")
+                except Exception as e:
+                    await event.reply("❌ **Failed to unmute user.**")
+                    logger.error(f"Unmute error: {e}")
+            else:
+                await event.reply("❌ **Usage:** `/unmute @username`")
+
+        # Hi / Hello / Greetings
+        elif message_text in ['hi', 'hello', 'hey', 'hii', 'hlw']:
+            await client.send_file(event.chat_id, gif_path, caption=cached_messages["hi"])
+
+        # Free Command - With Mute Logic and Auto Delete
+        elif 'free' in message_text:
+            user_times = free_requests.get(user_id, [])
+            user_times = [t for t in user_times if now - t < timedelta(minutes=5)]
+            user_times.append(now)
+            free_requests[user_id] = user_times
+
+            if len(user_times) > 5:
+                await event.reply(cached_messages["mute_warning"])
+                try:
+                    await client(EditBannedRequest(
+                        peer=event.chat_id,
+                        user_id=user_id,
+                        banned_rights=ChatBannedRights(
+                            until_date=now + timedelta(minutes=5),
+                            send_messages=True
+                        )
+                    ))
+                except Exception as e:
+                    logger.error(f"Failed to mute user: {e}")
+            else:
+                msg = await event.reply(cached_messages["free"], link_preview=False)
+                await asyncio.sleep(60)
+                try:
+                    await msg.delete()
+                except Exception as e:
+                    logger.error(f"Failed to delete free message: {e}")
+
     except Exception as e:
-        await event.reply("An error occurred while processing your request. Please try again later.")
-        logger.error(f"Error handling message: {e}")
+        logger.error(f"Error in handler: {e}")
 
-# Start the client
+# Start Bot
 client.start()
-logger.info("Client is running...")
-
-# Run the client until you stop it
+logger.info("🤖 Payment Bot is running... (Private users only, safe mode)")
 client.run_until_disconnected()
