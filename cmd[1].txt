@@ -1,0 +1,17 @@
+VPS ENV CMD
+
+sudo apt update
+
+sudo apt install python3 python3-venv -y
+
+sudo apt install python3-pip
+
+python3 -m venv myenv
+
+source myenv/bin/activate 
+
+pip install python-telegram-bot
+
+pip install telethon python-dotenv
+
+python qr3.py
